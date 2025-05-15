@@ -459,3 +459,128 @@ def create_dataloaders(
         return train_loader, val_loader, test_loader
     
     return train_loader, val_loader
+
+
+def visualize_model_evaluation(
+    eval_results: Dict[str, Union[float, np.ndarray]], 
+    class_names: Optional[List[str]] = None
+) -> Dict[str, float]:
+    """
+    Visualize the results from the evaluate_model function.
+    
+    Args:
+        eval_results (dict): Dictionary output from evaluate_model function
+        class_names (list, optional): List of class names for classification problems
+    
+    Returns:
+        Dict[str, float]: Dictionary containing performance metrics
+    """
+    import seaborn as sns
+    from sklearn.metrics import confusion_matrix, roc_curve, precision_recall_curve, auc, classification_report
+    
+    plt.style.use("fivethirtyeight")
+    fig = plt.figure(figsize=(15, 12))
+    
+    true_labels = eval_results["true_labels"]
+    predictions = eval_results["predictions"]
+    
+    is_binary = (len(predictions.shape) == 1 or predictions.shape[1] == 1)
+    
+    plt.subplot(2, 2, 1)
+    metrics = {
+        "Test Loss": eval_results["test_loss"],
+        "Test Accuracy": eval_results["test_acc"]
+    }
+    
+    if is_binary:
+        from sklearn.metrics import precision_score, recall_score, f1_score
+        
+        if np.max(predictions) > 1:
+            y_pred = (predictions > 0.5).astype(int)
+        else:
+            y_pred = predictions
+            
+        precision = precision_score(true_labels, y_pred)
+        recall = recall_score(true_labels, y_pred)
+        f1 = f1_score(true_labels, y_pred)
+        
+        metrics.update({
+            "Precision": precision,
+            "Recall": recall,
+            "F1 Score": f1
+        })
+    
+    sns.barplot(x=list(metrics.keys()), y=list(metrics.values()))
+    plt.title("Model Performance Metrics")
+    plt.ylim(0, 1)
+    plt.xticks(rotation=45)
+    
+    plt.subplot(2, 2, 2)
+    
+    if is_binary:
+        binary_preds = (predictions > 0.5).astype(int)
+        cm = confusion_matrix(true_labels, binary_preds)
+        labels = ["Negative", "Positive"] if class_names is None else class_names
+    else:
+        cm = confusion_matrix(true_labels, predictions.argmax(axis=1))
+        labels = [f"Class {i}" for i in range(cm.shape[0])] if class_names is None else class_names
+        
+    sns.heatmap(cm, annot=True, fmt="d", cmap="Blues", xticklabels=labels, yticklabels=labels)
+    plt.title("Confusion Matrix")
+    plt.xlabel("Predicted")
+    plt.ylabel("True")
+    
+    plt.subplot(2, 2, 3)
+    
+    if is_binary:
+        fpr, tpr, _ = roc_curve(true_labels, predictions)
+        roc_auc = auc(fpr, tpr)
+        
+        plt.plot(fpr, tpr, label=f"ROC Curve (AUC = {roc_auc:.3f})")
+        plt.plot([0, 1], [0, 1], "k--")
+        plt.xlim([0.0, 1.0])
+        plt.ylim([0.0, 1.05])
+        plt.xlabel("False Positive Rate")
+        plt.ylabel("True Positive Rate")
+        plt.title("Receiver Operating Characteristic")
+        plt.legend(loc="lower right")
+    else:
+        class_correct = np.zeros(len(labels))
+        class_total = np.zeros(len(labels))
+        
+        pred_classes = predictions.argmax(axis=1)
+        for i in range(len(true_labels)):
+            label = int(true_labels[i])
+            class_correct[label] += (pred_classes[i] == label)
+            class_total[label] += 1
+            
+        class_acc = class_correct / class_total
+        
+        sns.barplot(x=labels, y=class_acc)
+        plt.title("Per-Class Accuracy")
+        plt.ylim(0, 1)
+        plt.xticks(rotation=45)
+    
+    plt.subplot(2, 2, 4)
+    
+    if is_binary:
+        precision, recall, _ = precision_recall_curve(true_labels, predictions)
+        pr_auc = auc(recall, precision)
+        
+        plt.plot(recall, precision, label=f"PR Curve (AUC = {pr_auc:.3f})")
+        plt.xlim([0.0, 1.0])
+        plt.ylim([0.0, 1.05])
+        plt.xlabel("Recall")
+        plt.ylabel("Precision")
+        plt.title("Precision-Recall Curve")
+        plt.legend(loc="lower left")
+    else:
+        report = classification_report(true_labels, predictions.argmax(axis=1), target_names=labels)
+        plt.axis("off")
+        plt.text(0.1, 0.1, report, fontsize=10, family="monospace")
+        plt.title("Classification Report")
+    
+    plt.tight_layout()
+    plt.show()
+    
+    return metrics
