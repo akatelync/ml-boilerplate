@@ -261,25 +261,20 @@ def evaluate_model(
     all_preds = []
     all_labels = []
     
-    # No gradients needed for evaluation
     with torch.no_grad():
         for inputs, labels in tqdm(test_loader, desc="Evaluating"):
             inputs, labels = inputs.to(device), labels.to(device)
             
-            # Handle different label shapes for binary classification
             if not multi_class and labels.dim() == 1:
                 labels = labels.float().unsqueeze(1)
             
-            # Forward pass
             outputs = model(inputs)
             loss = criterion(outputs, labels)
             
-            # Statistics
             batch_size = inputs.size(0)
             test_loss += loss.item() * batch_size
             total += batch_size
             
-            # Calculate accuracy based on problem type
             if multi_class:
                 _, predicted = torch.max(outputs, 1)
                 correct += (predicted == labels).sum().item()
@@ -287,15 +282,12 @@ def evaluate_model(
                 predicted = (outputs > threshold).float()
                 correct += (predicted == labels).sum().item()
             
-            # Collect predictions and labels for additional metrics
             all_preds.extend(predicted.cpu().numpy())
             all_labels.extend(labels.cpu().numpy())
     
-    # Calculate metrics
     test_loss = test_loss / total
     test_acc = correct / total
     
-    # Return metrics
     return {
         "test_loss": test_loss,
         "test_acc": test_acc,
