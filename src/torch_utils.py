@@ -7,11 +7,13 @@ A collection of useful functions for training and evaluating PyTorch models.
 import os
 import time
 import copy
-from typing import Dict, List, Tuple, Optional, Union, Any, Callable
+import random
 import torch
 import numpy as np
 import matplotlib.pyplot as plt
 from tqdm import tqdm
+from typing import Dict, List, Tuple, Optional, Union, Any, Callable
+import torchvision.transforms as transforms
 
 def train_model(
     model: torch.nn.Module, 
@@ -461,6 +463,102 @@ def create_dataloaders(
     return train_loader, val_loader
 
 
+class TransformDataset(torch.utils.data.Dataset):
+    def __init__(self, dataset, transform=None):
+        self.dataset = dataset
+        self.transform = transform
+        
+    def __getitem__(self, index):
+        image, label = self.dataset[index]
+        if self.transform:
+            image = self.transform(image)
+        return image, label
+    
+    def __len__(self):
+        return len(self.dataset)
+
+
+def create_dataloaders_with_transforms(
+   dataset: torch.utils.data.Dataset,
+   batch_size: int,
+   train_transform: transforms.Compose,
+   val_transform: transforms.Compose,
+   test_transform: Optional[transforms.Compose] = None,
+   val_split: float = 0.2,
+   test_split: Optional[float] = None,
+   random_seed: int = 42,
+   num_workers: int = 4,
+   pin_memory: bool = True
+) -> Union[Tuple[torch.utils.data.DataLoader, torch.utils.data.DataLoader], Tuple[torch.utils.data.DataLoader, torch.utils.data.DataLoader, torch.utils.data.DataLoader]]:
+   torch.manual_seed(random_seed)
+   np.random.seed(random_seed)
+   random.seed(random_seed)
+   
+   dataset_size = len(dataset)
+   
+   if test_split is not None:
+       train_val_size = int((1 - test_split) * dataset_size)
+       test_size = dataset_size - train_val_size
+       
+       train_val_dataset, test_dataset = torch.utils.data.random_split(
+           dataset, 
+           [train_val_size, test_size],
+           generator=torch.Generator().manual_seed(random_seed)
+       )
+       
+       train_size = int((1 - val_split) * train_val_size)
+       val_size = train_val_size - train_size
+       
+       train_dataset, val_dataset = torch.utils.data.random_split(
+           train_val_dataset, 
+           [train_size, val_size],
+           generator=torch.Generator().manual_seed(random_seed)
+       )
+   else:
+       train_size = int((1 - val_split) * dataset_size)
+       val_size = dataset_size - train_size
+       
+       train_dataset, val_dataset = torch.utils.data.random_split(
+           dataset, 
+           [train_size, val_size],
+           generator=torch.Generator().manual_seed(random_seed)
+       )
+   
+   train_dataset = TransformDataset(train_dataset, transform=train_transform)
+   val_dataset = TransformDataset(val_dataset, transform=val_transform)
+   
+   train_loader = torch.utils.data.DataLoader(
+       train_dataset,
+       batch_size=batch_size,
+       shuffle=True,
+       num_workers=num_workers,
+       pin_memory=pin_memory
+   )
+   
+   val_loader = torch.utils.data.DataLoader(
+       val_dataset,
+       batch_size=batch_size,
+       shuffle=False,
+       num_workers=num_workers,
+       pin_memory=pin_memory
+   )
+   
+   if test_split is not None:
+       test_transform_final = test_transform if test_transform else val_transform
+       test_dataset = TransformDataset(test_dataset, transform=test_transform_final)
+       
+       test_loader = torch.utils.data.DataLoader(
+           test_dataset,
+           batch_size=batch_size,
+           shuffle=False,
+           num_workers=num_workers,
+           pin_memory=pin_memory
+       )
+       return train_loader, val_loader, test_loader
+   
+   return train_loader, val_loader
+
+
 def visualize_model_evaluation(
     eval_results: Dict[str, Union[float, np.ndarray]], 
     class_names: Optional[List[str]] = None
@@ -478,7 +576,6 @@ def visualize_model_evaluation(
     import seaborn as sns
     from sklearn.metrics import confusion_matrix, roc_curve, precision_recall_curve, auc, classification_report
     
-    plt.style.use("fivethirtyeight")
     fig = plt.figure(figsize=(15, 12))
     
     true_labels = eval_results["true_labels"]
