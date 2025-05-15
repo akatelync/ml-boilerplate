@@ -233,10 +233,13 @@ def plot_training_history(
 def evaluate_model(
     model: torch.nn.Module, 
     test_loader: torch.utils.data.DataLoader, 
-    criterion: Callable, 
+    criterion: callable, 
     device: Optional[torch.device] = None, 
     threshold: float = 0.5, 
-    multi_class: bool = False
+    multi_class: bool = False,
+    means: Optional[np.ndarray] = None,
+    stds: Optional[np.ndarray] = None,
+    target_col_idx: int = 1
 ) -> Dict[str, Union[float, np.ndarray]]:
     """
     Evaluate a trained model on a test set.
@@ -248,9 +251,12 @@ def evaluate_model(
         device (str, optional): Device to evaluate on ('cuda' or 'cpu')
         threshold (float): Decision threshold for binary classification
         multi_class (bool): Whether this is a multi-class problem
+        means (np.ndarray, optional): Mean values used for normalization
+        stds (np.ndarray, optional): Standard deviation values used for normalization
+        target_col_idx (int): Index of the target temperature column
     
     Returns:
-        dict: Dictionary containing test metrics (loss, accuracy)
+        dict: Dictionary containing test metrics and predictions
     """
     if device is None:
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -258,7 +264,7 @@ def evaluate_model(
     model = model.to(device)
     
     model.eval()
-    test_loss, correct, total = 0, 0, 0
+    test_loss, total = 0, 0
     
     all_preds = []
     all_labels = []
@@ -267,7 +273,7 @@ def evaluate_model(
         for inputs, labels in tqdm(test_loader, desc="Evaluating"):
             inputs, labels = inputs.to(device), labels.to(device)
             
-            if not multi_class and labels.dim() == 1:
+            if not multi_class and labels.dim() == 1 and not isinstance(criterion, torch.nn.MSELoss):
                 labels = labels.float().unsqueeze(1)
             
             outputs = model(inputs)
@@ -277,24 +283,53 @@ def evaluate_model(
             test_loss += loss.item() * batch_size
             total += batch_size
             
-            if multi_class:
-                _, predicted = torch.max(outputs, 1)
-                correct += (predicted == labels).sum().item()
-            else:
-                predicted = (outputs > threshold).float()
-                correct += (predicted == labels).sum().item()
-            
-            all_preds.extend(predicted.cpu().numpy())
+            all_preds.extend(outputs.cpu().numpy())
             all_labels.extend(labels.cpu().numpy())
     
     test_loss = test_loss / total
-    test_acc = correct / total
+    
+    preds_array = np.array(all_preds)
+    labels_array = np.array(all_labels)
+    
+    # Calculate metrics in normalized scale
+    mae = np.mean(np.abs(preds_array - labels_array))
+    mse = np.mean((preds_array - labels_array) ** 2)
+    rmse = np.sqrt(mse)
+    
+    # Convert to original scale if means and stds are provided
+    if means is not None and stds is not None:
+        # Ensure both predictions and true values are unnormalized consistently
+        preds_orig = preds_array * stds[target_col_idx] + means[target_col_idx]
+        labels_orig = labels_array * stds[target_col_idx] + means[target_col_idx]
+        
+        # Calculate metrics in original scale
+        mae_orig = np.mean(np.abs(preds_orig - labels_orig))
+        mse_orig = np.mean((preds_orig - labels_orig) ** 2)
+        rmse_orig = np.sqrt(mse_orig)
+        
+        return {
+            "test_loss": test_loss,
+            "test_acc": 0.0,  # Not applicable for regression
+            "predictions": preds_array,  # Normalized predictions
+            "true_labels": labels_array,  # Normalized labels
+            "mae": mae,
+            "mse": mse,
+            "rmse": rmse,
+            "mae_original": mae_orig,
+            "mse_original": mse_orig,
+            "rmse_original": rmse_orig,
+            "predictions_original": preds_orig,  # Unnormalized predictions
+            "true_labels_original": labels_orig  # Unnormalized labels
+        }
     
     return {
         "test_loss": test_loss,
-        "test_acc": test_acc,
-        "predictions": np.array(all_preds),
-        "true_labels": np.array(all_labels)
+        "test_acc": 0.0,  # Not applicable for regression
+        "predictions": preds_array,
+        "true_labels": labels_array,
+        "mae": mae,
+        "mse": mse,
+        "rmse": rmse
     }
 
 
@@ -561,7 +596,8 @@ def create_dataloaders_with_transforms(
 
 def visualize_model_evaluation(
     eval_results: Dict[str, Union[float, np.ndarray]], 
-    class_names: Optional[List[str]] = None
+    class_names: Optional[List[str]] = None,
+    is_regression: bool = True
 ) -> Dict[str, float]:
     """
     Visualize the results from the evaluate_model function.
@@ -569,115 +605,227 @@ def visualize_model_evaluation(
     Args:
         eval_results (dict): Dictionary output from evaluate_model function
         class_names (list, optional): List of class names for classification problems
+        is_regression (bool): Whether this is a regression problem
     
     Returns:
         Dict[str, float]: Dictionary containing performance metrics
     """
     import seaborn as sns
-    from sklearn.metrics import confusion_matrix, roc_curve, precision_recall_curve, auc, classification_report
     
-    fig = plt.figure(figsize=(15, 12))
-    
-    true_labels = eval_results["true_labels"]
-    predictions = eval_results["predictions"]
-    
-    is_binary = (len(predictions.shape) == 1 or predictions.shape[1] == 1)
-    
-    plt.subplot(2, 2, 1)
-    metrics = {
-        "Test Loss": eval_results["test_loss"],
-        "Test Accuracy": eval_results["test_acc"]
-    }
-    
-    if is_binary:
-        from sklearn.metrics import precision_score, recall_score, f1_score
+    if is_regression:
+        # Create a 2x2 subplot for regression metrics
+        fig = plt.figure(figsize=(15, 12))
         
-        if np.max(predictions) > 1:
-            y_pred = (predictions > 0.5).astype(int)
+        # Extract data
+        predictions = eval_results.get("predictions_original", eval_results["predictions"])
+        true_labels = eval_results.get("true_labels_original", eval_results["true_labels"])
+        
+        # Ensure predictions and true_labels are the same shape
+        if len(predictions) != len(true_labels):
+            # Handle potential shape mismatch
+            min_len = min(len(predictions), len(true_labels))
+            predictions = predictions[:min_len]
+            true_labels = true_labels[:min_len]
+        
+        # Subplot 1: Key Metrics
+        plt.subplot(2, 2, 1)
+        metrics = {
+            "MAE": eval_results.get("mae_original", eval_results["mae"]),
+            "RMSE": eval_results.get("rmse_original", eval_results["rmse"]),
+            "MSE": eval_results.get("mse_original", eval_results["mse"]),
+            "Test Loss": eval_results["test_loss"]
+        }
+        
+        sns.barplot(x=list(metrics.keys()), y=list(metrics.values()))
+        plt.title("Regression Performance Metrics")
+        plt.xticks(rotation=45)
+        
+        # Subplot 2: Predicted vs Actual
+        plt.subplot(2, 2, 2)
+        max_samples = min(1000, len(predictions))  # Limit number of points to plot
+        indices = np.random.choice(len(predictions), max_samples, replace=False)
+        
+        # Ensure predictions and true_labels are flattened for scatter plot
+        p_flat = np.array(predictions).flatten()
+        t_flat = np.array(true_labels).flatten()
+        
+        plt.scatter(t_flat[indices], p_flat[indices], alpha=0.5)
+        
+        # Add perfect prediction line
+        min_val = min(np.min(t_flat), np.min(p_flat))
+        max_val = max(np.max(t_flat), np.max(p_flat))
+        plt.plot([min_val, max_val], [min_val, max_val], "r--")
+        
+        plt.xlabel("True Values")
+        plt.ylabel("Predictions")
+        plt.title("Predicted vs True Values")
+        
+        # Subplot 3: Residuals Plot
+        plt.subplot(2, 2, 3)
+        residuals = p_flat - t_flat
+        
+        plt.scatter(t_flat[indices], residuals[indices], alpha=0.5)
+        plt.axhline(y=0, color="r", linestyle="--")
+        
+        plt.xlabel("True Values")
+        plt.ylabel("Residuals")
+        plt.title("Residuals Plot")
+        
+        # Subplot 4: Error Distribution
+        plt.subplot(2, 2, 4)
+        sns.histplot(residuals, kde=True)
+        plt.axvline(x=0, color="r", linestyle="--")
+        
+        plt.xlabel("Prediction Error")
+        plt.ylabel("Frequency")
+        plt.title("Error Distribution")
+        
+        plt.tight_layout()
+        plt.show()
+        
+        # Create a time series plot if predictions are sequential
+        plt.figure(figsize=(12, 6))
+        samples_to_plot = min(200, len(predictions))
+        
+        plt.plot(t_flat[:samples_to_plot], label="True Values", linewidth=2)
+        plt.plot(p_flat[:samples_to_plot], label="Predictions", linewidth=1, linestyle="--")
+        
+        plt.xlabel("Sample Index")
+        plt.ylabel("Value")
+        plt.title("Time Series: Predicted vs True Values")
+        plt.legend()
+        plt.grid(True)
+        plt.show()
+        
+    else:
+        import seaborn as sns
+        from sklearn.metrics import confusion_matrix, roc_curve, precision_recall_curve, auc
+        
+        fig = plt.figure(figsize=(15, 12))
+    
+        true_labels = eval_results["true_labels"]
+        predictions = eval_results["predictions"]
+        
+        # Convert predictions to proper format for classification metrics
+        if len(predictions.shape) > 1 and predictions.shape[1] > 1:
+            # Multi-class case: predictions are probabilities
+            is_binary = False
+            pred_classes = np.argmax(predictions, axis=1)
         else:
-            y_pred = predictions
+            is_binary = True
+            predictions = np.array(predictions).flatten()
+            true_labels = np.array(true_labels).flatten()
             
-        precision = precision_score(true_labels, y_pred)
-        recall = recall_score(true_labels, y_pred)
-        f1 = f1_score(true_labels, y_pred)
-        
-        metrics.update({
-            "Precision": precision,
-            "Recall": recall,
-            "F1 Score": f1
-        })
-    
-    sns.barplot(x=list(metrics.keys()), y=list(metrics.values()))
-    plt.title("Model Performance Metrics")
-    plt.ylim(0, 1)
-    plt.xticks(rotation=45)
-    
-    plt.subplot(2, 2, 2)
-    
-    if is_binary:
-        binary_preds = (predictions > 0.5).astype(int)
-        cm = confusion_matrix(true_labels, binary_preds)
-        labels = ["Negative", "Positive"] if class_names is None else class_names
-    else:
-        cm = confusion_matrix(true_labels, predictions.argmax(axis=1))
-        labels = [f"Class {i}" for i in range(cm.shape[0])] if class_names is None else class_names
-        
-    sns.heatmap(cm, annot=True, fmt="d", cmap="Blues", xticklabels=labels, yticklabels=labels)
-    plt.title("Confusion Matrix")
-    plt.xlabel("Predicted")
-    plt.ylabel("True")
-    
-    plt.subplot(2, 2, 3)
-    
-    if is_binary:
-        fpr, tpr, _ = roc_curve(true_labels, predictions)
-        roc_auc = auc(fpr, tpr)
-        
-        plt.plot(fpr, tpr, label=f"ROC Curve (AUC = {roc_auc:.3f})")
-        plt.plot([0, 1], [0, 1], "k--")
-        plt.xlim([0.0, 1.0])
-        plt.ylim([0.0, 1.05])
-        plt.xlabel("False Positive Rate")
-        plt.ylabel("True Positive Rate")
-        plt.title("Receiver Operating Characteristic")
-        plt.legend(loc="lower right")
-    else:
-        class_correct = np.zeros(len(labels))
-        class_total = np.zeros(len(labels))
-        
-        pred_classes = predictions.argmax(axis=1)
-        for i in range(len(true_labels)):
-            label = int(true_labels[i])
-            class_correct[label] += (pred_classes[i] == label)
-            class_total[label] += 1
+            if np.max(predictions) > 1 or np.min(predictions) < 0:
+                predictions = 1 / (1 + np.exp(-predictions))
+                
+            pred_classes = (predictions > 0.5).astype(int)
             
-        class_acc = class_correct / class_total
+        # Plot 1: Performance Metrics
+        plt.subplot(2, 2, 1)
+        metrics = {
+            "Test Loss": eval_results["test_loss"],
+            "Test Accuracy": eval_results["test_acc"]
+        }
         
-        sns.barplot(x=labels, y=class_acc)
-        plt.title("Per-Class Accuracy")
+        if is_binary:
+            from sklearn.metrics import precision_score, recall_score, f1_score
+            
+            precision = precision_score(true_labels, pred_classes)
+            recall = recall_score(true_labels, pred_classes)
+            f1 = f1_score(true_labels, pred_classes)
+            
+            metrics.update({
+                "Precision": precision,
+                "Recall": recall,
+                "F1 Score": f1
+            })
+        
+        sns.barplot(x=list(metrics.keys()), y=list(metrics.values()))
+        plt.title("Model Performance Metrics")
         plt.ylim(0, 1)
         plt.xticks(rotation=45)
-    
-    plt.subplot(2, 2, 4)
-    
-    if is_binary:
-        precision, recall, _ = precision_recall_curve(true_labels, predictions)
-        pr_auc = auc(recall, precision)
         
-        plt.plot(recall, precision, label=f"PR Curve (AUC = {pr_auc:.3f})")
-        plt.xlim([0.0, 1.0])
-        plt.ylim([0.0, 1.05])
-        plt.xlabel("Recall")
-        plt.ylabel("Precision")
-        plt.title("Precision-Recall Curve")
-        plt.legend(loc="lower left")
-    else:
-        report = classification_report(true_labels, predictions.argmax(axis=1), target_names=labels)
-        plt.axis("off")
-        plt.text(0.1, 0.1, report, fontsize=10, family="monospace")
-        plt.title("Classification Report")
-    
-    plt.tight_layout()
-    plt.show()
-    
+        # Plot 2: Confusion Matrix
+        plt.subplot(2, 2, 2)
+        
+        if is_binary:
+            cm = confusion_matrix(true_labels, pred_classes)
+            labels = ["Negative", "Positive"] if class_names is None else class_names
+        else:
+            cm = confusion_matrix(true_labels, pred_classes)
+            labels = [f"Class {i}" for i in range(cm.shape[0])] if class_names is None else class_names
+            
+        sns.heatmap(cm, annot=True, fmt="d", cmap="Blues", xticklabels=labels, yticklabels=labels)
+        plt.title("Confusion Matrix")
+        plt.xlabel("Predicted")
+        plt.ylabel("True")
+        
+        # Plot 3: ROC Curve for binary, Class Accuracy for multi-class
+        plt.subplot(2, 2, 3)
+        
+        if is_binary:
+            fpr, tpr, _ = roc_curve(true_labels, predictions)
+            roc_auc = auc(fpr, tpr)
+            
+            plt.plot(fpr, tpr, label=f"ROC Curve (AUC = {roc_auc:.3f})")
+            plt.plot([0, 1], [0, 1], "k--")
+            plt.xlim([0.0, 1.0])
+            plt.ylim([0.0, 1.05])
+            plt.xlabel("False Positive Rate")
+            plt.ylabel("True Positive Rate")
+            plt.title("Receiver Operating Characteristic")
+            plt.legend(loc="lower right")
+        else:
+            classes = np.unique(true_labels)
+            class_correct = np.zeros(len(classes))
+            class_total = np.zeros(len(classes))
+            
+            for i, c in enumerate(classes):
+                class_mask = (true_labels == c)
+                class_correct[i] = np.sum((pred_classes[class_mask] == c))
+                class_total[i] = np.sum(class_mask)
+                
+            class_acc = class_correct / np.maximum(class_total, 1)  # Avoid division by zero
+            
+            if class_names is None:
+                display_labels = [f"Class {c}" for c in classes]
+            else:
+                display_labels = [class_names[int(c)] if int(c) < len(class_names) else f"Class {c}" 
+                                 for c in classes]
+            
+            sns.barplot(x=display_labels, y=class_acc)
+            plt.title("Per-Class Accuracy")
+            plt.ylim(0, 1)
+            plt.xticks(rotation=45)
+        
+        # Plot 4: Precision-Recall Curve for binary, Classification Report for multi-class
+        plt.subplot(2, 2, 4)
+        
+        if is_binary:
+            precision, recall, _ = precision_recall_curve(true_labels, predictions)
+            pr_auc = auc(recall, precision)
+            
+            plt.plot(recall, precision, label=f"PR Curve (AUC = {pr_auc:.3f})")
+            plt.xlim([0.0, 1.0])
+            plt.ylim([0.0, 1.05])
+            plt.xlabel("Recall")
+            plt.ylabel("Precision")
+            plt.title("Precision-Recall Curve")
+            plt.legend(loc="lower left")
+        else:
+            from sklearn.metrics import classification_report
+            
+            if class_names is not None and len(class_names) == len(np.unique(true_labels)):
+                report = classification_report(true_labels, pred_classes, target_names=class_names)
+            else:
+                report = classification_report(true_labels, pred_classes)
+                
+            plt.axis("off")
+            plt.text(0.1, 0.1, report, fontsize=10, family="monospace")
+            plt.title("Classification Report")
+        
+        plt.tight_layout()
+        plt.show()
+        
     return metrics
