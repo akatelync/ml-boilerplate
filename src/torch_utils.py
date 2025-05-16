@@ -264,10 +264,11 @@ def evaluate_model(
     model = model.to(device)
     
     model.eval()
-    test_loss, total = 0, 0
+    test_loss, test_correct, test_total = 0, 0, 0
     
     all_preds = []
     all_labels = []
+    all_probs = []  # For storing probabilities
     
     with torch.no_grad():
         for inputs, labels in tqdm(test_loader, desc="Evaluating"):
@@ -281,56 +282,133 @@ def evaluate_model(
             
             batch_size = inputs.size(0)
             test_loss += loss.item() * batch_size
-            total += batch_size
+            test_total += batch_size
             
-            all_preds.extend(outputs.cpu().numpy())
-            all_labels.extend(labels.cpu().numpy())
+            # For multi-class classification
+            if multi_class:
+                _, predicted = torch.max(outputs, 1)
+                test_correct += (predicted == labels).sum().item()
+                
+                # Store raw outputs (logits)
+                all_preds.append(outputs.cpu().numpy())
+                
+                # Store class indices as labels (not one-hot)
+                all_labels.append(labels.cpu().numpy())
+                
+                # Calculate and store probabilities
+                probs = torch.nn.functional.softmax(outputs, dim=1)
+                all_probs.append(probs.cpu().numpy())
+            else:
+                # Binary classification or regression
+                if isinstance(criterion, torch.nn.MSELoss) or isinstance(criterion, torch.nn.L1Loss):
+                    # Regression
+                    all_preds.append(outputs.cpu().numpy())
+                else:
+                    # Binary classification
+                    test_correct += ((outputs > threshold) == labels).sum().item()
+                    all_preds.append(outputs.cpu().numpy())
+                
+                all_labels.append(labels.cpu().numpy())
     
-    test_loss = test_loss / total
+    test_loss = test_loss / test_total
+    test_acc = test_correct / test_total if test_total > 0 else 0
     
-    preds_array = np.array(all_preds)
-    labels_array = np.array(all_labels)
+    preds_array = np.vstack(all_preds) if all_preds else np.array([])
+    labels_array = np.concatenate(all_labels) if all_labels else np.array([])
+    probs_array = np.vstack(all_probs) if all_probs else np.array([])
     
-    # Calculate metrics in normalized scale
-    mae = np.mean(np.abs(preds_array - labels_array))
-    mse = np.mean((preds_array - labels_array) ** 2)
-    rmse = np.sqrt(mse)
-    
-    # Convert to original scale if means and stds are provided
-    if means is not None and stds is not None:
-        # Ensure both predictions and true values are unnormalized consistently
-        preds_orig = preds_array * stds[target_col_idx] + means[target_col_idx]
-        labels_orig = labels_array * stds[target_col_idx] + means[target_col_idx]
+    # For multi-class, calculate metrics like accuracy
+    if multi_class:
+        # Get predicted classes
+        if len(preds_array.shape) > 1 and preds_array.shape[1] > 1:
+            predicted_classes = np.argmax(preds_array, axis=1)
+        else:
+            predicted_classes = preds_array
         
-        # Calculate metrics in original scale
-        mae_orig = np.mean(np.abs(preds_orig - labels_orig))
-        mse_orig = np.mean((preds_orig - labels_orig) ** 2)
-        rmse_orig = np.sqrt(mse_orig)
+        # Calculate accuracy and confusion matrix
+        from sklearn.metrics import accuracy_score, confusion_matrix
+        acc = accuracy_score(labels_array, predicted_classes)
+        cm = confusion_matrix(labels_array, predicted_classes)
         
         return {
             "test_loss": test_loss,
-            "test_acc": 0.0,  # Not applicable for regression
-            "predictions": preds_array,  # Normalized predictions
-            "true_labels": labels_array,  # Normalized labels
-            "mae": mae,
-            "mse": mse,
-            "rmse": rmse,
-            "mae_original": mae_orig,
-            "mse_original": mse_orig,
-            "rmse_original": rmse_orig,
-            "predictions_original": preds_orig,  # Unnormalized predictions
-            "true_labels_original": labels_orig  # Unnormalized labels
+            "test_acc": acc,
+            "confusion_matrix": cm,
+            "predictions": preds_array,  # Raw logits
+            "predicted_classes": predicted_classes,  # Class indices
+            "true_labels": labels_array,  # True class indices
+            "probabilities": probs_array  # Class probabilities
         }
-    
-    return {
-        "test_loss": test_loss,
-        "test_acc": 0.0,  # Not applicable for regression
-        "predictions": preds_array,
-        "true_labels": labels_array,
-        "mae": mae,
-        "mse": mse,
-        "rmse": rmse
-    }
+    else:
+        # For regression or binary classification
+        if isinstance(criterion, torch.nn.MSELoss) or isinstance(criterion, torch.nn.L1Loss):
+            # Regression metrics
+            mae = np.mean(np.abs(preds_array - labels_array))
+            mse = np.mean((preds_array - labels_array) ** 2)
+            rmse = np.sqrt(mse)
+            
+            # Convert to original scale if means and stds are provided
+            if means is not None and stds is not None:
+                # Ensure both predictions and true values are unnormalized consistently
+                preds_orig = preds_array * stds[target_col_idx] + means[target_col_idx]
+                labels_orig = labels_array * stds[target_col_idx] + means[target_col_idx]
+                
+                # Calculate metrics in original scale
+                mae_orig = np.mean(np.abs(preds_orig - labels_orig))
+                mse_orig = np.mean((preds_orig - labels_orig) ** 2)
+                rmse_orig = np.sqrt(mse_orig)
+                
+                return {
+                    "test_loss": test_loss,
+                    "test_acc": test_acc,
+                    "predictions": preds_array,  # Normalized predictions
+                    "true_labels": labels_array,  # Normalized labels
+                    "mae": mae,
+                    "mse": mse,
+                    "rmse": rmse,
+                    "mae_original": mae_orig,
+                    "mse_original": mse_orig,
+                    "rmse_original": rmse_orig,
+                    "predictions_original": preds_orig,  # Unnormalized predictions
+                    "true_labels_original": labels_orig  # Unnormalized labels
+                }
+            
+            return {
+                "test_loss": test_loss,
+                "test_acc": test_acc,
+                "predictions": preds_array,
+                "true_labels": labels_array,
+                "mae": mae,
+                "mse": mse,
+                "rmse": rmse
+            }
+        else:
+            # Binary classification metrics
+            from sklearn.metrics import roc_auc_score, precision_score, recall_score, f1_score
+            
+            # Convert to binary predictions for metric calculation
+            binary_preds = (preds_array > threshold).astype(int)
+            
+            # Calculate metrics
+            try:
+                auc = roc_auc_score(labels_array, preds_array)
+            except:
+                auc = 0.0
+                
+            precision = precision_score(labels_array, binary_preds, zero_division=0)
+            recall = recall_score(labels_array, binary_preds, zero_division=0)
+            f1 = f1_score(labels_array, binary_preds, zero_division=0)
+            
+            return {
+                "test_loss": test_loss,
+                "test_acc": test_acc,
+                "predictions": preds_array,
+                "true_labels": labels_array,
+                "auc": auc,
+                "precision": precision,
+                "recall": recall,
+                "f1": f1
+            }
 
 
 def save_model(
